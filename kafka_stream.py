@@ -2,67 +2,54 @@ import uuid
 from datetime import datetime
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+import requests
+import json
+import logging
+from kafka import KafkaProducer
+import time
 
-default_args = {
-    'owner': 'airscholar',
-    'start_date': datetime(2023, 9, 3, 10, 00)
+# Default arguments for the DAG
+dag_args = {
+    'owner': 'data_streamer',
+    'start_date': datetime(2023, 9, 3, 10, 0)
 }
 
-def get_data():
-    import requests
+def fetch_user_data():
+    """Fetching data from an API that generates random user profiles."""
+    response = requests.get("https://randomuser.me/api/")
+    user_data = response.json()['results'][0]
+    return user_data
 
-    res = requests.get("https://randomuser.me/api/")
-    res = res.json()
-    res = res['results'][0]
+def transform_user_data(raw_data):
+    """Transforming raw user data into a structured dictionary."""
+    user = {
+        'id': uuid.uuid4(),
+        'first_name': raw_data['name']['first'],
+        'last_name': rawur_data['name']['last'],
+        'gender': raw_data['gender'],
+        'address': f"{raw_data['location']['street']['number']} {raw_data['location']['street']['name']}, "
+                   f"{raw_data['location']['city']}, {raw_data['location']['state']}, {raw_data['location']['country']}",
+        'post_code': raw_data['location']['postcode'],
+        'email': raw_data['email'],
+        'username': raw_data['login']['username'],
+        'dob': raw_data['dob']['date'],
+        'registered_date': raw_data['registered']['date'],
+        'phone': raw_data['phone'],
+        'picture': raw_data['picture']['medium']
+    }
+    return user
 
-    return res
+def send_to_kafka(user_data):
+    """Sending transformed data to a Kafka topic for further processing."""
+    try:
+        producer = KafkaProducer(bootstrap_servers=['broker:29092'], max_block_ms=5000)
+        producer.send('users_created', json.dumps(user_data).encode('utf-8'))
+        producer.flush()
+    except Exception as e:
+        logging.error(f"Failed to send data to Kafka due to: {e}")
 
-def format_data(res):
-    data = {}
-    location = res['location']
-    data['id'] = uuid.uuid4()
-    data['first_name'] = res['name']['first']
-    data['last_name'] = res['name']['last']
-    data['gender'] = res['gender']
-    data['address'] = f"{str(location['street']['number'])} {location['street']['name']}, " \
-                      f"{location['city']}, {location['state']}, {location['country']}"
-    data['post_code'] = location['postcode']
-    data['email'] = res['email']
-    data['username'] = res['login']['username']
-    data['dob'] = res['dob']['date']
-    data['registered_date'] = res['registered']['date']
-    data['phone'] = res['phone']
-    data['picture'] = res['picture']['medium']
-
-    return data
-
-def stream_data():
-    import json
-    from kafka import KafkaProducer
-    import time
-    import logging
-
-    producer = KafkaProducer(bootstrap_servers=['broker:29092'], max_block_ms=5000)
-    curr_time = time.time()
-
-    while True:
-        if time.time() > curr_time + 60: #1 minute
-            break
-        try:
-            res = get_data()
-            res = format_data(res)
-
-            producer.send('users_created', json.dumps(res).encode('utf-8'))
-        except Exception as e:
-            logging.error(f'An error occured: {e}')
-            continue
-
-with DAG('user_automation',
-         default_args=default_args,
-         schedule_interval='@daily',
-         catchup=False) as dag:
-
-    streaming_task = PythonOperator(
-        task_id='stream_data_from_api',
-        python_callable=stream_data
+with DAG('user_data_pipeline', default_args=dag_args, schedule_interval='@daily', catchup=False) as dag:
+    fetch_and_process_user_data = PythonOperator(
+        task_id='fetch_and_transform_user_data',
+        python_callable=lambda: send_to_kafka(transform_user_data(fetch_user_data()))
     )
